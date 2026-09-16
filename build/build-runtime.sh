@@ -70,9 +70,23 @@ log "install Python 3.14 (python-build-standalone, glibc 2.17+)"
 mkdir -p "$BUILD_ROOT"
 uv python install 3.14
 PY_SRC="$(uv python find 3.14)"
-mv "$(dirname "$(dirname "$PY_SRC")")" "$BUILD_ROOT/python"
+# `uv python find` can hand back an alias directory that is itself a symlink into
+# the store. Moving that would leave a dangling `python` link in the payload, so
+# resolve to the real prefix, copy it in, and then delete the store entirely so
+# nothing downstream can quietly keep depending on it.
+PY_PREFIX="$(dirname "$(dirname "$(readlink -f "$PY_SRC")")")"
+echo "uv store prefix: $PY_PREFIX"
+rm -rf "$BUILD_ROOT/python"
+cp -a "$PY_PREFIX" "$BUILD_ROOT/python"
+rm -rf "$UV_PYTHON_INSTALL_DIR"
+
+if [ ! -d "$BUILD_ROOT/python" ] || [ -L "$BUILD_ROOT/python" ]; then
+    echo "ERROR: bundled python prefix is not a real directory" >&2
+    exit 1
+fi
+
 PY_BIN="$BUILD_ROOT/python/bin/python3.14"
-"$PY_BIN" -c 'import platform, sys; print(sys.version); print(platform.machine())'
+"$PY_BIN" -c 'import platform, sys; print(sys.version); print(platform.machine(), "prefix=" + sys.prefix)'
 
 log "clone MoviePilot ${MP_VERSION}"
 git clone --depth 1 --branch "$MP_VERSION" \
@@ -91,7 +105,13 @@ log "make the venv self-relocating"
 # them for relative ones means the payload keeps working after it is moved,
 # even if someone unpacks it by hand instead of through the installer.
 PY_REAL="$(readlink -f "$BUILD_ROOT/python/bin/python3.14")"
-PY_REL="${PY_REAL#"$BUILD_ROOT"/}"
+case "$PY_REAL" in
+    "$BUILD_ROOT"/*) PY_REL="${PY_REAL#"$BUILD_ROOT"/}" ;;
+    *)
+        echo "ERROR: venv base interpreter escapes the payload: $PY_REAL" >&2
+        exit 1
+        ;;
+esac
 (
     cd "$VENV_DIR/bin"
     ln -sfn "../../${PY_REL}" python3.14
