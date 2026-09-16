@@ -99,6 +99,11 @@ jobs:
     if: needs.resolve.outputs.matrix != '[]'
     runs-on: ${{ matrix.runner }}
     container: debian:12-slim
+    defaults:
+      run:
+        # Steps execute inside debian:12-slim where /bin/sh is dash; dash has
+        # no `set -o pipefail`, so every step must go through bash.
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
@@ -115,6 +120,9 @@ jobs:
         run: bash build/build-runtime.sh
 
       - name: Publish payload to release
+        # The job body runs inside debian:12-slim, whose /bin/sh is dash and
+        # rejects `set -o pipefail`. Pin bash so the script actually parses.
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
