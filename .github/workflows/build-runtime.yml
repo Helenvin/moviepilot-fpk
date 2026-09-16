@@ -135,16 +135,20 @@ jobs:
           checksum="${asset}.sha256"
           test -f "$asset"
 
-          api="https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets"
+          # Reads and deletes live on api.github.com, but asset uploads must
+          # go to uploads.github.com — POSTing to the api.github.com assets
+          # collection only ever answers 404.
+          asset_api="https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets"
+          upload_api="https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets"
 
           for file in "$asset" "$checksum"; do
             name="$(basename "$file")"
             existing=$(curl -fsS -H "Authorization: Bearer ${GH_API_TOKEN}" \
-              "${api}?per_page=100" | jq -r --arg n "$name" '.[] | select(.name==$n) | .id')
+              "${asset_api}?per_page=100" | jq -r --arg n "$name" '.[] | select(.name==$n) | .id')
             if [ -n "$existing" ]; then
               echo "removing existing asset ${name} (${existing})"
               curl -fsS -X DELETE -H "Authorization: Bearer ${GH_API_TOKEN}" \
-                "${api}/${existing}" >/dev/null
+                "${asset_api}/${existing}" >/dev/null
             fi
             echo "uploading ${name} ($(du -h "$file" | cut -f1))"
             curl -fsS --retry 3 --retry-all-errors --retry-delay 5 \
@@ -153,9 +157,9 @@ jobs:
               -H "Content-Type: application/octet-stream" \
               -H "Accept: application/vnd.github+json" \
               --data-binary "@${file}" \
-              "${api}?name=${name}" >/dev/null
+              "${upload_api}?name=${name}" >/dev/null
           done
 
           echo "published:"
-          curl -fsS -H "Authorization: Bearer ${GH_API_TOKEN}" "${api}?per_page=100" \
+          curl -fsS -H "Authorization: Bearer ${GH_API_TOKEN}" "${asset_api}?per_page=100" \
             | jq -r '.[] | "  \(.name)  \(.size)"'
