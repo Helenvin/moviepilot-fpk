@@ -43,11 +43,6 @@ def main() -> int:
     parser.add_argument("--venv", required=True, help="venv directory to create")
     parser.add_argument("--node-version", default="20.12.1")
     parser.add_argument("--root", default=os.getcwd(), help="MoviePilot checkout")
-    parser.add_argument(
-        "--skip-browser",
-        action="store_true",
-        help="skip the stealth Chromium download (debugging runs only)",
-    )
     args = parser.parse_args()
 
     root = Path(args.root).resolve()
@@ -59,20 +54,16 @@ def main() -> int:
     frontend_version = version.FRONTEND_VERSION
     print(f"==> MoviePilot {app_version} / frontend {frontend_version}", flush=True)
 
-    # 1. Backend dependencies. install_deps() also pre-fetches the stealth
-    #    Chromium into CLOAKBROWSER_CACHE_DIR, which the caller exported.
-    local_setup.install_deps(
-        python_bin=args.python,
-        venv_dir=Path(args.venv),
-        recreate=True,
+    # 1. Node runtime first. npm carries a `#!/usr/bin/env node` shebang, so it
+    #    only works once its own bin directory is on PATH -- upstream's
+    #    installer relies on having just prepended it, we have to do it here.
+    node_dir = Path(local_setup.install_node_runtime(args.node_version)).parent
+    os.environ["PATH"] = os.pathsep.join(
+        [str(node_dir), os.environ.get("PATH", "")]
     )
+    print(f"==> node on PATH: {node_dir}", flush=True)
 
-    if args.skip_browser:
-        print("==> skipping browser kernel (--skip-browser)", flush=True)
-    elif not (Path(os.environ["CLOAKBROWSER_CACHE_DIR"]) / "").exists():
-        raise RuntimeError("CLOAKBROWSER_CACHE_DIR was not exported by the caller")
-
-    # 2. Frontend bundle, fetched straight from the release asset so no
+    # 2. Frontend bundle, fetched straight from the release asset so that no
     #    GitHub API call is involved.
     archive = Path("/tmp/moviepilot-frontend-dist.zip")
     url = (
@@ -88,10 +79,18 @@ def main() -> int:
         archive=archive,
     )
 
-    # 3. Site adapters (.so bound to the interpreter version and machine type).
+    # 3. Backend dependencies. install_deps() also pre-fetches the stealth
+    #    Chromium into CLOAKBROWSER_CACHE_DIR, which the caller exported.
+    local_setup.install_deps(
+        python_bin=args.python,
+        venv_dir=Path(args.venv),
+        recreate=True,
+    )
+
+    # 4. Site adapters (.so bound to the interpreter version and machine type).
     local_setup.install_resources(None, None)
 
-    # 4. Everything the payload must not carry.
+    # 5. Everything the payload must not carry.
     for junk in (".git", "tests", "docs", "skills", "frontend-dist"):
         target = root / junk
         if target.exists():

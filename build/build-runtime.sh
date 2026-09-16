@@ -102,6 +102,17 @@ ls -l "$VENV_DIR/bin/python" "$VENV_DIR/bin/python3" "$VENV_DIR/bin/python3.14"
 "$VENV_DIR/bin/python" -c 'import sys; print("venv:", sys.prefix, sys.version_info[:3])'
 
 log "finalize payload"
+# Anything still pointing at the build prefix with an absolute symlink cannot be
+# fixed by a textual rewrite. The installer rebuilds these, but surfacing them
+# here keeps the two sides honest.
+ABS_LINKS="$(find "$BUILD_ROOT/python" "$BUILD_ROOT/venv" "$BUILD_ROOT/app/.runtime" \
+    -type l -lname '/*' 2>/dev/null || true)"
+if [ -n "$ABS_LINKS" ]; then
+    printf 'absolute symlinks found (rewritten by the installer):\n%s\n' "$ABS_LINKS"
+else
+    echo "no absolute symlinks in python/, venv/, app/.runtime/"
+fi
+
 cat > "$BUILD_ROOT/BUILD-INFO" <<EOF
 moviepilot_version=${MP_VERSION}
 frontend_version=$("$PY_BIN" -c 'import version; print(version.FRONTEND_VERSION)')
