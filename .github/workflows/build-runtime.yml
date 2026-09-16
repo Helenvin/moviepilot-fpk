@@ -1,0 +1,153 @@
+name: Build MoviePilot native runtime
+
+# Produces the relocatable runtime payloads (CPython 3.14 + venv + Node +
+# site adapters + stealth Chromium) that Helenvin/fn-apps unpacks into the
+# MoviePilot fpk. Payloads are published as assets on a `runtime/<tag>`
+# release, one per architecture.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'MoviePilot upstream tag (empty = newest v3 release)'
+        required: false
+        default: ''
+      node_version:
+        description: 'Bundled Node runtime version'
+        required: false
+        default: '20.12.1'
+      force:
+        description: 'Rebuild even when the release already carries both payloads'
+        required: false
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - 'build/**'
+      - '.github/workflows/build-runtime.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: moviepilot-runtime
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      release_id: ${{ steps.resolve.outputs.release_id }}
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+      - name: Resolve upstream version and release
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_VERSION: ${{ inputs.version }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+
+          version="$INPUT_VERSION"
+          if [ -z "$version" ]; then
+            version=$(gh api "repos/jxxghp/MoviePilot/releases?per_page=50" \
+              --jq '[.[] | select(.tag_name | test("^v3\\."))][0].tag_name')
+          fi
+          if [ -z "$version" ] || [ "$version" = "null" ]; then
+            echo "::error::could not resolve a MoviePilot v3 release tag"
+            exit 1
+          fi
+          echo "upstream version: $version"
+
+          tag="runtime/${version}"
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "MoviePilot ${version} native runtime" \
+              --notes "Relocatable runtime payloads for the MoviePilot fnOS package.
+
+          These assets contain a bundled CPython, the backend virtualenv, Node,
+          the frontend bundle, the site adapters and the stealth Chromium.
+          They are consumed by https://github.com/Helenvin/fn-apps and are not
+          meant to be installed on their own."
+          fi
+
+          release_id=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" --jq .id)
+          assets=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" --jq '.[].name' || true)
+          echo "existing assets: ${assets:-<none>}"
+
+          matrix='[]'
+          for entry in "amd64:ubuntu-latest" "arm64:ubuntu-24.04-arm"; do
+            arch="${entry%%:*}"
+            runner="${entry##*:}"
+            asset="moviepilot-runtime-${arch}.tar.zst"
+            if [ "$FORCE" = "true" ] || ! printf '%s\n' "$assets" | grep -qx "$asset"; then
+              matrix=$(printf '%s' "$matrix" | jq -c --arg a "$arch" --arg r "$runner" '. + [{arch:$a, runner:$r}]')
+            fi
+          done
+
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "release_id=${release_id}" >> "$GITHUB_OUTPUT"
+          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
+          echo "build matrix: ${matrix}"
+
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.matrix != '[]'
+    runs-on: ${{ matrix.runner }}
+    container: debian:12-slim
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.resolve.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build runtime payload
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+          MP_VERSION: ${{ needs.resolve.outputs.version }}
+          NODE_VERSION: ${{ inputs.node_version || '20.12.1' }}
+          OUT_DIR: ${{ github.workspace }}/out
+        run: bash build/build-runtime.sh
+
+      - name: Publish payload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.resolve.outputs.release_id }}
+          TARGET_ARCH: ${{ matrix.arch }}
+          OUT_DIR: ${{ github.workspace }}/out
+        run: |
+          set -euo pipefail
+          asset="${OUT_DIR}/moviepilot-runtime-${TARGET_ARCH}.tar.zst"
+          checksum="${asset}.sha256"
+          test -f "$asset"
+
+          api="https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets"
+
+          for file in "$asset" "$checksum"; do
+            name="$(basename "$file")"
+            existing=$(curl -fsS -H "Authorization: Bearer ${GH_API_TOKEN}" \
+              "${api}?per_page=100" | jq -r --arg n "$name" '.[] | select(.name==$n) | .id')
+            if [ -n "$existing" ]; then
+              echo "removing existing asset ${name} (${existing})"
+              curl -fsS -X DELETE -H "Authorization: Bearer ${GH_API_TOKEN}" \
+                "${api}/${existing}" >/dev/null
+            fi
+            echo "uploading ${name} ($(du -h "$file" | cut -f1))"
+            curl -fsS --retry 3 --retry-all-errors --retry-delay 5 \
+              -X POST \
+              -H "Authorization: Bearer ${GH_API_TOKEN}" \
+              -H "Content-Type: application/octet-stream" \
+              -H "Accept: application/vnd.github+json" \
+              --data-binary "@${file}" \
+              "${api}?name=${name}" >/dev/null
+          done
+
+          echo "published:"
+          curl -fsS -H "Authorization: Bearer ${GH_API_TOKEN}" "${api}?per_page=100" \
+            | jq -r '.[] | "  \(.name)  \(.size)"'
